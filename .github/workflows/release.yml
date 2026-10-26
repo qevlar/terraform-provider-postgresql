@@ -1,22 +1,31 @@
-# This GitHub action can publish assets for release when a tag is created.
-# Currently its setup to run on any tag that matches the pattern "v*" (ie. v0.1.0).
+# Publishes the qevlar fork on every "v*" tag: GoReleaser builds the release
+# archives, then the network mirror metadata is regenerated for all releases
+# and deployed to GitHub Pages.
 #
-# This uses an action (paultyng/ghaction-import-gpg) that assumes you set your 
-# private key in the `GPG_PRIVATE_KEY` secret and passphrase in the `PASSPHRASE`
-# secret. If you would rather own your own GPG handling, please fork this action
-# or use an alternative one for key handling.
-#
-# You will need to pass the `--batch` flag to `gpg` in your signing step 
-# in `goreleaser` to indicate this is being used in a non-interactive mode.
+# Consumers point Terraform at the mirror with a CLI config:
+#   provider_installation {
+#     network_mirror {
+#       url     = "https://qevlar.github.io/terraform-provider-postgresql/"
+#       include = ["registry.terraform.io/cyrilgdn/postgresql"]
+#     }
+#     direct {
+#       exclude = ["registry.terraform.io/cyrilgdn/postgresql"]
+#     }
+#   }
 #
 name: release
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+
 jobs:
   goreleaser:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       -
         name: Checkout
@@ -30,18 +39,33 @@ jobs:
         with:
           go-version: '1.26'
       -
-        name: Import GPG key
-        id: import_gpg
-        uses: crazy-max/ghaction-import-gpg@v7
-        with:
-          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
-          passphrase: ${{ secrets.PASSPHRASE }}
-      -
         name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
           version: latest
           args: release --clean
         env:
-          GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  mirror:
+    needs: goreleaser
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Generate mirror metadata
+        run: scripts/generate-mirror.sh site
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
