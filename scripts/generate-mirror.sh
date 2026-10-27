@@ -11,14 +11,28 @@ repo="${GITHUB_REPOSITORY:?}"
 dir="$out/registry.terraform.io/cyrilgdn/postgresql"
 mkdir -p "$dir"
 
+# Upstream releases are mirrored too: once consumers route cyrilgdn/postgresql
+# through this mirror, Terraform no longer falls back to the registry, so every
+# version still pinned in a lock file must be listed here.
+upstream_repo="cyrilgdn/terraform-provider-postgresql"
+upstream_tags="${UPSTREAM_TAGS:-v1.26.0 v1.27.0}"
+
 versions='{}'
-for tag in $(gh release list -R "$repo" --limit 100 --json tagName,isDraft -q '.[] | select(.isDraft | not) | .tagName'); do
-  v="${tag#v}"
-  base="https://github.com/$repo/releases/download/$tag"
+publish() {
+  local repo="$1" tag="$2" v="${2#v}"
+  local base="https://github.com/$repo/releases/download/$tag"
   # SHA256SUMS lines: "<sha256>  terraform-provider-postgresql_<v>_<os>_<arch>.zip"
   gh release download "$tag" -R "$repo" -p '*_SHA256SUMS' -O - |
     awk -v base="$base" '/\.zip$/ { n = split($2, a, "_"); arch = a[n]; sub(/\.zip$/, "", arch); printf "%s_%s\t%s/%s\t%s\n", a[n-1], arch, base, $2, $1 }' |
     jq -Rn '{archives: ([inputs | split("\t") | {(.[0]): {url: .[1], hashes: ["zh:" + .[2]]}}] | add)}' > "$dir/$v.json"
   versions=$(jq --arg v "$v" '.versions[$v] = {}' <<<"$versions")
+}
+
+for tag in $upstream_tags; do
+  publish "$upstream_repo" "$tag"
+done
+# Fork releases last, so they win if a version ever exists in both.
+for tag in $(gh release list -R "$repo" --limit 100 --json tagName,isDraft -q '.[] | select(.isDraft | not) | .tagName'); do
+  publish "$repo" "$tag"
 done
 echo "$versions" > "$dir/index.json"
